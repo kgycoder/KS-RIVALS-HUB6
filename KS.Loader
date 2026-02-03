@@ -90,10 +90,12 @@ local rbHrp = nil
 local rbHum = nil
 
 -- No Recoil 전용 변수
-local noRecoilActive = false
-local GunModule = nil
-local OriginalStartShooting = nil
-local crosshairProtected = false
+local nrGunModule = nil
+local nrItemLibrary = nil
+local nrOriginalRecoil = nil
+local nrOriginalStartShooting = nil
+local nrOriginal_LocalTracers = nil
+local nrCrosshairProtected = false
 
 local function saveConfig()
     local config = {
@@ -830,6 +832,143 @@ local function EndLoadingAnimation(callback)
 end
 
 -- ============================================
+-- NO RECOIL LOGIC
+-- ============================================
+
+local function initNoRecoilModules()
+    pcall(function()
+        local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts", 5)
+        if not PlayerScripts then return end
+        
+        for _, module in pairs(PlayerScripts:GetDescendants()) do
+            if module:IsA("ModuleScript") and module.Name == "Gun" then
+                nrGunModule = require(module)
+                break
+            end
+        end
+        
+        if nrGunModule then
+            nrOriginalRecoil = nrGunModule._Recoil
+            nrOriginalStartShooting = nrGunModule.StartShooting
+            nrOriginal_LocalTracers = nrGunModule._LocalTracers
+        end
+        
+        local ItemLibraryModule = ReplicatedStorage:WaitForChild("Modules", 5)
+        if ItemLibraryModule then
+            ItemLibraryModule = ItemLibraryModule:WaitForChild("ItemLibrary", 5)
+            if ItemLibraryModule then
+                nrItemLibrary = require(ItemLibraryModule)
+            end
+        end
+    end)
+end
+
+local function enableNoRecoil()
+    if not nrGunModule then
+        initNoRecoilModules()
+        if not nrGunModule then
+            createNotification("NoRecoil: Gun module not found")
+            return
+        end
+    end
+    
+    pcall(function()
+        nrGunModule._Recoil = function(self, multiplier)
+            return
+        end
+        
+        nrGunModule.StartShooting = function(self, arg2, arg3)
+            local success, event, cameraData, isAiming, extra1, extra2 = nrOriginalStartShooting(self, arg2, arg3)
+            if success then
+                return success, event, cameraData, true, extra1, extra2
+            end
+            return success, event, cameraData, isAiming, extra1, extra2
+        end
+        
+        nrGunModule._LocalTracers = function(self, isAiming, arg3)
+            return nrOriginal_LocalTracers(self, true, arg3)
+        end
+        
+        if nrItemLibrary and nrItemLibrary.Items then
+            for weaponName, weaponData in pairs(nrItemLibrary.Items) do
+                if weaponData.Type == "Gun" then
+                    weaponData.ShootRecoil = 0
+                    weaponData.AimSpreadMultiplier = 0
+                end
+            end
+        end
+        
+        if not nrCrosshairProtected then
+            task.spawn(function()
+                local playerGui = LocalPlayer:WaitForChild("PlayerGui", 5)
+                if not playerGui then return end
+                
+                local possiblePaths = {
+                    "Crosshair",
+                    "HUD/Crosshair",
+                    "GameUI/Crosshair",
+                    "Interface/Crosshair",
+                    "Gameplay/Crosshair"
+                }
+                
+                for _, path in ipairs(possiblePaths) do
+                    local parts = string.split(path, "/")
+                    local current = playerGui
+                    
+                    for _, part in ipairs(parts) do
+                        current = current:FindFirstChild(part)
+                        if not current then break end
+                    end
+                    
+                    if current then
+                        RunService.RenderStepped:Connect(function()
+                            if not NO_RECOIL_ENABLED then return end
+                            if current then
+                                current.Visible = true
+                                for _, descendant in ipairs(current:GetDescendants()) do
+                                    if descendant:IsA("GuiObject") then
+                                        if descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
+                                            if descendant.ImageTransparency > 0.9 then
+                                                descendant.ImageTransparency = 0
+                                            end
+                                        end
+                                        if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+                                            if descendant.TextTransparency > 0.9 then
+                                                descendant.TextTransparency = 0
+                                            end
+                                        end
+                                        descendant.Visible = true
+                                    end
+                                end
+                            end
+                        end)
+                        nrCrosshairProtected = true
+                        break
+                    end
+                end
+            end)
+        end
+    end)
+    
+    createNotification("No Recoil Enabled")
+end
+
+local function disableNoRecoil()
+    if not nrGunModule or not nrOriginalRecoil or not nrOriginalStartShooting or not nrOriginal_LocalTracers then
+        createNotification("No Recoil Disabled")
+        return
+    end
+    
+    pcall(function()
+        nrGunModule._Recoil = nrOriginalRecoil
+        nrGunModule.StartShooting = nrOriginalStartShooting
+        nrGunModule._LocalTracers = nrOriginal_LocalTracers
+    end)
+    
+    createNotification("No Recoil Disabled")
+end
+
+-- ============================================
 -- THIRD PERSON CAMERA LOGIC (Updated with Mouse Wheel Zoom)
 -- ============================================
 
@@ -938,123 +1077,6 @@ local function hookCharacterForNoCoolTime()
             task.wait(0.05)
             removeCooldowns()
         end
-    end)
-end
-
--- ============================================
--- NO RECOIL LOGIC
--- ============================================
-
-local function enableNoRecoil()
-    if noRecoilActive then return end
-    
-    pcall(function()
-        local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts")
-        
-        if not GunModule then
-            for _, module in pairs(PlayerScripts:GetDescendants()) do
-                if module:IsA("ModuleScript") and module.Name == "Gun" then
-                    GunModule = require(module)
-                    break
-                end
-            end
-        end
-        
-        if GunModule then
-            GunModule._Recoil = function(self, multiplier)
-                return
-            end
-            
-            if not OriginalStartShooting then
-                OriginalStartShooting = GunModule.StartShooting
-            end
-            
-            GunModule.StartShooting = function(self, arg2, arg3)
-                local success, event, cameraData, isAiming, extra1, extra2 = OriginalStartShooting(self, arg2, arg3)
-                
-                if success then
-                    return success, event, cameraData, true, extra1, extra2
-                end
-                
-                return success, event, cameraData, isAiming, extra1, extra2
-            end
-        end
-        
-        local ItemLibrary = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("ItemLibrary")
-        ItemLibrary = require(ItemLibrary)
-        
-        for weaponName, weaponData in pairs(ItemLibrary.Items) do
-            if weaponData.Type == "Gun" then
-                weaponData.ShootRecoil = 0
-                weaponData.AimSpreadMultiplier = 0
-            end
-        end
-        
-        if not crosshairProtected then
-            local playerGui = LocalPlayer:WaitForChild("PlayerGui")
-            local possiblePaths = {
-                "Crosshair",
-                "HUD/Crosshair",
-                "GameUI/Crosshair",
-                "Interface/Crosshair",
-                "Gameplay/Crosshair"
-            }
-            
-            for _, path in ipairs(possiblePaths) do
-                local parts = string.split(path, "/")
-                local current = playerGui
-                
-                for _, part in ipairs(parts) do
-                    current = current:FindFirstChild(part)
-                    if not current then break end
-                end
-                
-                if current then
-                    RunService.RenderStepped:Connect(function()
-                        if current then
-                            current.Visible = true
-                            
-                            for _, descendant in ipairs(current:GetDescendants()) do
-                                if descendant:IsA("GuiObject") then
-                                    if descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
-                                        if descendant.ImageTransparency > 0.9 then
-                                            descendant.ImageTransparency = 0
-                                        end
-                                    end
-                                    
-                                    if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
-                                        if descendant.TextTransparency > 0.9 then
-                                            descendant.TextTransparency = 0
-                                        end
-                                    end
-                                    
-                                    descendant.Visible = true
-                                end
-                            end
-                        end
-                    end)
-                    
-                    crosshairProtected = true
-                    break
-                end
-            end
-        end
-        
-        noRecoilActive = true
-        createNotification("No Recoil Enabled")
-    end)
-end
-
-local function disableNoRecoil()
-    if not noRecoilActive then return end
-    
-    pcall(function()
-        if GunModule and OriginalStartShooting then
-            GunModule.StartShooting = OriginalStartShooting
-        end
-        
-        noRecoilActive = false
-        createNotification("No Recoil Disabled")
     end)
 end
 
@@ -1858,7 +1880,7 @@ UIHandlers.UpdateRageBot = CreateToggle("Rage bot", AimPage, function(v)
     end
 end, "RageBotKeybind", RAGE_BOT_ENABLED)
 
-UIHandlers.UpdateNoRecoil = CreateToggle("No spread,recoil", AimPage, function(v)
+CreateToggle("No spread,recoil", AimPage, function(v)
     NO_RECOIL_ENABLED = v
     if v then
         enableNoRecoil()
@@ -1891,7 +1913,7 @@ CreateToggle("Load skin changer", VisualPage, function(v)
         else
             createNotification("Skin Changer Failed")
             warn("Skin Changer Error:", err)
-        end
+                end
     else
         createNotification("Skin Changer Disabled")
     end
@@ -2004,6 +2026,12 @@ local function RunLoadingSequence()
             end)
         end)
     end
+    if NO_RECOIL_ENABLED then
+        pcall(function()
+            initNoRecoilModules()
+            enableNoRecoil()
+        end)
+    end
     UpdateLoadingProgress(70, "Weapon Modules Ready")
     task.wait(0.15)
     UpdateLoadingProgress(75, "Loading External Scripts...")
@@ -2034,7 +2062,6 @@ local function RunLoadingSequence()
     if AUTO_MATCH_ENABLED then pcall(attemptJoinMatch) end
     if RAGE_BOT_ENABLED then pcall(rbUpdateCharacterRefs) end
     if THIRD_PERSON_ENABLED then pcall(enableThirdPerson) end
-    if NO_RECOIL_ENABLED then pcall(enableNoRecoil) end
     UpdateLoadingProgress(95, "Auto Features Ready")
     task.wait(0.15)
     UpdateLoadingProgress(98, "Applying Configuration...")
@@ -2093,9 +2120,14 @@ if FULL_AUTO_ENABLED then
             end)
         end)
     end
+    if NO_RECOIL_ENABLED then
+        pcall(function()
+            initNoRecoilModules()
+            enableNoRecoil()
+        end)
+    end
     if RAGE_BOT_ENABLED then rbUpdateCharacterRefs() end
     if THIRD_PERSON_ENABLED then enableThirdPerson() end
-    if NO_RECOIL_ENABLED then enableNoRecoil() end
     updateESPStates()
     ShowTab("Aim")
     task.wait(1)
